@@ -69,14 +69,13 @@ def resource_path(p):
 
 
 def set_app_icon(root):
-    path = resource_path("logo.png")
+    path = resource_path("logo.ico")
     if os.path.exists(path):
         try:
-            img = tk.PhotoImage(file=path)
-            root.iconphoto(True, img)
-            root._icon_img_ref = img
+            root.iconbitmap(path)
         except:
             pass
+
 
 
 # -----------------------------
@@ -312,13 +311,42 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(APP_TITLE)
-        self.geometry("900x600")
-        self.minsize(900, 580)
+        self.geometry("1000x650")
+        self.minsize(1000, 620)
         set_app_icon(self)
 
-        self.style = ttk.Style(self)
-        self.style.configure("Big.TButton", padding=(12, 8), font=("Segoe UI", 10, "bold"))
+        # =============================
+        # Global UI Styling (Option A)
+        # =============================
+        style = ttk.Style(self)
 
+        # Bigger notebook tabs
+        style.configure(
+            "TNotebook.Tab",
+            padding=(20, 12),
+            font=("Segoe UI", 12, "bold")
+        )
+
+        # Bigger text for labels
+        style.configure("TLabel", font=("Segoe UI", 12))
+
+        # Bigger text entry
+        style.configure("TEntry", font=("Segoe UI", 12))
+
+        # Bigger buttons
+        style.configure(
+            "Big.TButton",
+            padding=(14, 10),
+            font=("Segoe UI", 12, "bold")
+        )
+
+        # Bigger combobox font
+        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 12))
+        self.option_add("*Font", ("Segoe UI", 12))
+
+        # =============================
+        # Load cache
+        # =============================
         cache = load_cache()
         last_dir = cache.get("last_backup_dir", DEFAULT_BACKUP_DIR)
         self.backup_dir = tk.StringVar(value=last_dir)
@@ -332,14 +360,14 @@ class App(tk.Tk):
 
         # Notebook
         self.notebook = ttk.Notebook(self)
-        self.tab_backup = ttk.Frame(self.notebook)
-        self.tab_restore = ttk.Frame(self.notebook)
-        self.tab_about = ttk.Frame(self.notebook)
+        self.tab_backup = ttk.Frame(self.notebook, padding=15)
+        self.tab_restore = ttk.Frame(self.notebook, padding=15)
+        self.tab_about = ttk.Frame(self.notebook, padding=15)
 
         self.notebook.add(self.tab_backup, text="Backup")
         self.notebook.add(self.tab_restore, text="Restore")
         self.notebook.add(self.tab_about, text="About")
-        self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Build tabs
         self.build_backup_tab()
@@ -357,27 +385,23 @@ class App(tk.Tk):
         header = ttk.Frame(self, padding=(10, 10))
         header.pack(fill="x")
 
+        # Load header PNG logo (scaled automatically)
+        logo_png = resource_path("logo.png")
+        if os.path.exists(logo_png):
+            try:
+                orig = tk.PhotoImage(file=logo_png)
 
-        logo_path = resource_path("logo.png")
-        if os.path.exists(logo_path):
-                # Load original
-                orig = tk.PhotoImage(file=logo_path)
+                target_h = 40  # final height of the header icon
+                orig_h = orig.height()
+                orig_w = orig.width()
 
-                # Target height (like Windows App Updater)
-                target_h = 40
-                ratio = orig.width() / orig.height()
-                target_w = int(target_h * ratio)
+                # compute scale (subsample requires integers)
+                scale = max(1, orig_h // target_h)
 
-                # Shrink using built-in subsample
-                # Determine best integer subsample factor
-                fx = max(1, orig.width() // target_w)
-                fy = max(1, orig.height() // target_h)
-
-                self.header_logo = orig.subsample(fx, fy)
-
+                self.header_logo = orig.subsample(scale, scale)
                 tk.Label(header, image=self.header_logo).pack(side="left", padx=(0, 10))
-
-
+            except:
+                pass
 
         ttk.Label(
             header,

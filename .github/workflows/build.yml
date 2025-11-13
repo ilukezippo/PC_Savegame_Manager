@@ -29,7 +29,7 @@ jobs:
         pyinstaller --noconfirm `
           --onefile `
           --windowed `
-          --icon=logo.png `
+          --icon=logo.ico `
           --name "PC_Savegame_Manager" `
           "PC Savegame Manager 1.0.py"
 
