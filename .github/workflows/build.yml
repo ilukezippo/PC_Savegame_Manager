@@ -31,7 +31,7 @@ jobs:
           --windowed ^
           --icon=logo.png ^
           --name "PC_Savegame_Manager" ^
-          PC_Savegame_Manager.py
+          "PC Savegame Manager 1.0.py"
 
     - name: Upload executable to release
       uses: softprops/action-gh-release@v1
