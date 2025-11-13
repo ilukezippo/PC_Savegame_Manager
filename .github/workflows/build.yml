@@ -24,12 +24,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller
 
-    - name: Build EXE
+        - name: Build EXE
       run: |
         pyinstaller --noconfirm `
           --onefile `
           --windowed `
           --icon=logo.ico `
+          --add-data "logo.png;." `
+          --add-data "logo.ico;." `
           --name "PC_Savegame_Manager" `
           "PC Savegame Manager 1.0.py"
 

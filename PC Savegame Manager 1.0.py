@@ -63,16 +63,22 @@ def log_append(widget, text):
 # -----------------------------
 # Resource path + app icon
 # -----------------------------
-def resource_path(p):
-    base = getattr(sys, "_MEIPASS", os.path.abspath("."))
-    return os.path.join(base, p)
+def resource_path(relative_path):
+    try:
+        # PyInstaller creates _MEIPASS at runtime
+        base_path = sys._MEIPASS
+    except Exception:
+        # Running in normal Python environment
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 
 
 def set_app_icon(root):
     path = resource_path("logo.ico")
     if os.path.exists(path):
         try:
-            root.iconbitmap(path)
+            root.iconbitmap(resource_path("logo.ico"))
         except:
             pass
 
