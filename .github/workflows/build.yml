@@ -26,11 +26,11 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --noconfirm ^
-          --onefile ^
-          --windowed ^
-          --icon=logo.png ^
-          --name "PC_Savegame_Manager" ^
+        pyinstaller --noconfirm `
+          --onefile `
+          --windowed `
+          --icon=logo.png `
+          --name "PC_Savegame_Manager" `
           "PC Savegame Manager 1.0.py"
 
     - name: Upload executable to release
