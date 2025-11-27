@@ -33,7 +33,7 @@ jobs:
             --add-data "logo.png;." `
             --add-data "logo.ico;." `
             --name "PC_Savegame_Manager" `
-            "PC Savegame Manager 1.0.py"
+            "PC_Savegame_Manager.py"
 
       - name: Upload executable to release
         uses: softprops/action-gh-release@v1
