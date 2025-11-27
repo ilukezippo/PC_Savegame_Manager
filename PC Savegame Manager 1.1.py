@@ -368,16 +368,19 @@ class App(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.tab_backup = ttk.Frame(self.notebook, padding=15)
         self.tab_restore = ttk.Frame(self.notebook, padding=15)
+        self.tab_google = ttk.Frame(self.notebook, padding=15)
         self.tab_about = ttk.Frame(self.notebook, padding=15)
 
         self.notebook.add(self.tab_backup, text="Backup")
         self.notebook.add(self.tab_restore, text="Restore")
+        self.notebook.add(self.tab_google, text="Backup to Google") 
         self.notebook.add(self.tab_about, text="About")
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Build tabs
         self.build_backup_tab()
         self.build_restore_tab()
+        self.build_google_tab()
         self.build_about_tab()
 
         # Center + auto-check for updates
@@ -505,6 +508,81 @@ class App(tk.Tk):
             command=self.restore_backup,
             style="Big.TButton"
         ).pack(pady=10)
+
+    # -----------------------------
+    # GOOGLE CLOUD TAB
+    # -----------------------------
+    def build_google_tab(self):
+        frame = ttk.Frame(self.tab_google, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        # Save Game Folder
+        row1 = ttk.Frame(frame)
+        row1.pack(fill="x", pady=8)
+        ttk.Label(row1, text="Save Game Folder:").pack(side="left")
+        self.google_save_path = tk.StringVar()
+        ttk.Entry(row1, textvariable=self.google_save_path).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(row1, text="Browse…", command=self.browse_save_path, style="Big.TButton").pack(side="left")
+
+        # Google Drive Folder
+        row2 = ttk.Frame(frame)
+        row2.pack(fill="x", pady=8)
+        ttk.Label(row2, text="Google Drive Sync Folder:").pack(side="left")
+        self.google_drive_path = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.google_drive_path).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(row2, text="Browse…", command=self.browse_drive_path, style="Big.TButton").pack(side="left")
+
+        # Sync button
+        ttk.Button(
+            frame,
+            text="Sync Backup to Cloud",
+            style="Big.TButton",
+            command=self.sync_backup_to_cloud
+        ).pack(pady=20)
+
+
+    # -----------------------------
+    # GOOGLE CLOUD SYNC LOGIC
+    # -----------------------------
+    def sync_backup_to_cloud(self):
+        save_path = self.google_save_path.get().strip()
+        drive_path = self.google_drive_path.get().strip()
+
+        if not save_path or not os.path.isdir(save_path):
+            messagebox.showerror("Invalid Save Path", "Please select a valid save directory.")
+            return
+
+        if not drive_path or not os.path.isdir(drive_path):
+            messagebox.showerror("Invalid Google Drive Path", "Please select a valid Google Drive sync directory.")
+            return
+
+        try:
+            backup_path = save_path + "_backup"
+            if not os.path.exists(backup_path):
+                os.rename(save_path, backup_path)
+
+            cmd = f'mklink /J "{save_path}" "{drive_path}"'
+            result = os.system(cmd)
+            if result != 0:
+                messagebox.showerror(
+                    "Junction Failed",
+                    "Failed to create junction. Run the app as Administrator."
+                )
+                return
+
+            for item in os.listdir(backup_path):
+                src = os.path.join(backup_path, item)
+                dst = os.path.join(drive_path, item)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+
+            messagebox.showinfo("Success", "Cloud sync link created successfully!")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to sync:\n{e}")
+
 
     # -----------------------------
     # ABOUT TAB
@@ -664,6 +742,18 @@ class App(tk.Tk):
     # -----------------------------
     # Restore functions
     # -----------------------------
+    
+    def browse_save_path(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.google_save_path.set(d)
+
+    def browse_drive_path(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.google_drive_path.set(d)
+
+    
     def browse_zip(self):
         f = filedialog.askopenfilename(filetypes=[("ZIP Files", "*.zip")])
         if f:
