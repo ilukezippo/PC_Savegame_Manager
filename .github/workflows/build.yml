@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -25,11 +25,10 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm `
-            --onefile `
-            --windowed `
-            --icon=logo.ico `
+          pyinstaller --noconfirm --onefile --windowed `
+            --icon="logo.ico" `
             --add-data "logo.png;." `
             --add-data "logo.ico;." `
             --name "PC_Savegame_Manager" `
