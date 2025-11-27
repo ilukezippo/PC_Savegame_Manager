@@ -17,9 +17,9 @@ from tkinter import ttk, filedialog, messagebox
 # -----------------------------
 # App metadata
 # -----------------------------
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.1"
 APP_TITLE = f"PC Savegame Manager {APP_VERSION}"
-DATE_APP = "2025/11/13"
+DATE_APP = "2025/11/28"
 
 # Directories / cache
 CACHE_FILE = os.path.join(os.path.expanduser("~"), ".pc_savegame_manager_cache.json")
