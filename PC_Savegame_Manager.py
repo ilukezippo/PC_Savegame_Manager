@@ -11,15 +11,17 @@ import urllib.request
 from html.parser import HTMLParser
 import shutil
 import webbrowser
+import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import webbrowser
 
 # -----------------------------
 # App metadata
 # -----------------------------
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.2"
 APP_TITLE = f"PC Savegame Manager {APP_VERSION}"
-DATE_APP = "2025/11/28"
+DATE_APP = "2025/12/12"
 
 # Directories / cache
 CACHE_FILE = os.path.join(os.path.expanduser("~"), ".pc_savegame_manager_cache.json")
@@ -54,10 +56,25 @@ def save_cache(data):
 
 
 def log_append(widget, text):
-    widget.config(state="normal")
-    widget.insert("end", text + "\n")
-    widget.see("end")
-    widget.config(state="disabled")
+    """Thread-safe append to a Tk Text widget."""
+    def _do():
+        try:
+            widget.config(state="normal")
+            widget.insert("end", text + "\n")
+            widget.see("end")
+            widget.config(state="disabled")
+        except Exception:
+            # If widget was destroyed while a worker was still running
+            pass
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            widget.after(0, _do)
+    except Exception:
+        pass
+
 
 
 # -----------------------------
@@ -309,6 +326,81 @@ def find_save_paths(game_name, log_widget):
     return existing, hints
 
 
+
+# -----------------------------
+# Loading (Modal) Window
+# -----------------------------
+class LoadingWindow:
+    """A simple modal loading window that can be shown from the UI thread."""
+    def __init__(self, root):
+        self.root = root
+        self.win = None
+        self.msg_var = tk.StringVar(value="Working...")
+        self._show_count = 0
+
+    def show(self, message="Working..."):
+        self._show_count += 1
+        self.msg_var.set(message)
+
+        # Already visible -> just update text
+        if self.win and self.win.winfo_exists():
+            try:
+                self.win.lift()
+            except Exception:
+                pass
+            return
+
+        self.win = tk.Toplevel(self.root)
+        self.win.title("Working")
+        self.win.resizable(False, False)
+        self.win.transient(self.root)
+        self.win.attributes("-topmost", True)
+        self.win.protocol("WM_DELETE_WINDOW", lambda: None)  # disable close
+
+        pad = 14
+        wrap = ttk.Frame(self.win, padding=(pad, pad))
+        wrap.pack(fill="both", expand=True)
+
+        ttk.Label(wrap, textvariable=self.msg_var, font=("Segoe UI", 12, "bold")).pack(pady=(0, 10))
+
+        pb = ttk.Progressbar(wrap, mode="indeterminate", length=320)
+        pb.pack()
+        pb.start(10)
+
+        # Center it over the main window
+        self.root.update_idletasks()
+        self.win.update_idletasks()
+        rwx = self.root.winfo_rootx()
+        rwy = self.root.winfo_rooty()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        ww = self.win.winfo_width()
+        wh = self.win.winfo_height()
+        x = rwx + (rw // 2) - (ww // 2)
+        y = rwy + (rh // 2) - (wh // 2)
+        self.win.geometry(f"{ww}x{wh}+{x}+{y}")
+
+        try:
+            self.win.grab_set()
+        except Exception:
+            pass
+
+    def hide(self):
+        self._show_count = max(0, self._show_count - 1)
+        if self._show_count > 0:
+            return
+        if self.win and self.win.winfo_exists():
+            try:
+                self.win.grab_release()
+            except Exception:
+                pass
+            try:
+                self.win.destroy()
+            except Exception:
+                pass
+        self.win = None
+
+
 # -----------------------------
 # Main App
 # -----------------------------
@@ -361,6 +453,13 @@ class App(tk.Tk):
         self.suggest_after_id = None
         self.found_paths = []  # last found save paths
 
+        # Loading window (reused by workers)
+        self.loading = LoadingWindow(self)
+
+        # Suggestion request sequencing (prevents stale results)
+        self.suggest_seq = 0
+        self.last_suggest_query = ""
+
         # Header
         self.build_header()
 
@@ -373,9 +472,11 @@ class App(tk.Tk):
 
         self.notebook.add(self.tab_backup, text="Backup")
         self.notebook.add(self.tab_restore, text="Restore")
-        self.notebook.add(self.tab_google, text="Backup to Google") 
+        self.notebook.add(self.tab_google, text="Sync with Google Drive") 
         self.notebook.add(self.tab_about, text="About")
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         # Build tabs
         self.build_backup_tab()
@@ -427,6 +528,51 @@ class App(tk.Tk):
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     # -----------------------------
+    # Async helpers + loading
+    # -----------------------------
+    def run_async(self, loading_text, work_fn, on_success=None, on_error=None, show_loading=True):
+        """Run work_fn() in a daemon thread; marshal callbacks back to the UI thread."""
+        if show_loading:
+            self.loading.show(loading_text)
+
+        def _worker():
+            try:
+                result = work_fn()
+            except Exception as e:
+                tb = traceback.format_exc()
+
+                def _err():
+                    if show_loading:
+                        self.loading.hide()
+                    if on_error:
+                        on_error(e, tb)
+                    else:
+                        messagebox.showerror("Error", str(e))
+
+                self.after(0, _err)
+            else:
+                def _ok():
+                    if show_loading:
+                        self.loading.hide()
+                    if on_success:
+                        on_success(result)
+                self.after(0, _ok)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def on_tab_changed(self, event=None):
+        # Hide suggestions when switching tabs + invalidate any pending suggestion worker
+        self.suggest_seq += 1
+        if self.suggest_after_id:
+            try:
+                self.after_cancel(self.suggest_after_id)
+            except Exception:
+                pass
+            self.suggest_after_id = None
+        self.destroy_suggestion_box()
+
+
+    # -----------------------------
     # BACKUP TAB
     # -----------------------------
     def build_backup_tab(self):
@@ -443,6 +589,7 @@ class App(tk.Tk):
         self.game_entry.bind("<KeyRelease>", self.on_game_typed)
         self.game_entry.bind("<Down>", self.on_entry_down)
         self.game_entry.bind("<Return>", self.on_entry_return)
+        self.game_entry.bind("<FocusOut>", self.on_game_entry_focus_out)
 
         ttk.Button(
             row1,
@@ -535,15 +682,100 @@ class App(tk.Tk):
         # Sync button
         ttk.Button(
             frame,
-            text="Sync Backup to Cloud",
+            text="Sync Save to Cloud",
             style="Big.TButton",
             command=self.sync_backup_to_cloud
-        ).pack(pady=20)
+        ).pack(pady=(16, 10))
 
+        # =========================
+        # Scrollable instructions UI
+        # =========================
+
+        tips = ttk.Labelframe(frame, text="How to sync saves to Google Drive (Step-by-step)", padding=8)
+        tips.pack(fill="both", expand=True, padx=2, pady=(0, 10))
+
+        # Canvas + Scrollbar
+        canvas = tk.Canvas(tips, highlightthickness=0)
+        vscroll = ttk.Scrollbar(tips, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+
+        vscroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # The scrollable content frame (put labels inside this)
+        tips_body = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=tips_body, anchor="nw")
+
+        def _update_scrollregion(_=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _resize_inner(_=None):
+            # Make inner frame match canvas width so text wraps correctly
+            canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
+
+        tips_body.bind("<Configure>", _update_scrollregion)
+        canvas.bind("<Configure>", _resize_inner)
+
+        # Mouse wheel support (Windows)
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        # Bind when mouse is over the instructions area
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # ---- helper for steps (use tips_body now) ----
+        def _step(txt):
+            ttk.Label(tips_body, text=txt, wraplength=760, justify="left").pack(anchor="w", fill="x", pady=2)
+
+        # ---- clickable download link row (inside tips_body) ----
+        def _open_gdrive_download():
+            webbrowser.open("https://www.google.com/drive/download/")
+
+        row_link = ttk.Frame(tips_body)
+        row_link.pack(anchor="w", fill="x", pady=(0, 4))
+
+        ttk.Label(row_link, text="1- Download and install ").pack(side="left")
+        link = tk.Label(
+            row_link,
+            text="Google Drive for desktop",
+            fg="#1a73e8",
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        link.pack(side="left")
+        link.bind("<Button-1>", lambda e: _open_gdrive_download())
+        ttk.Label(row_link, text=" then sign in.").pack(side="left")
+
+        # ---- your steps ----
+        _step(
+            "2- Create a NEW empty folder inside your Google Drive to store this game's saves (example: Google Drive\\PC Saves\\Elden Ring).")
+        _step("3- In this tab, select:")
+        _step("   • Save Game Folder: the ORIGINAL folder where the game currently saves.")
+        _step("   • Google Drive Sync Folder: the NEW folder you created inside Google Drive.")
+        _step("4- IMPORTANT: Run the app as Administrator (needed for the junction command: mklink /J).")
+        _step("5- Click 'Sync Save to Cloud'. The app will do these actions:")
+        _step("   • Rename your save folder to: <SaveFolder>_backup (only the first time).")
+        _step("   • Create a junction at the original save path pointing to your Google Drive folder.")
+        _step("   • Copy all existing save files from <SaveFolder>_backup into Google Drive.")
+        _step(
+            "6- After that, the game still saves to the SAME old path, but Windows redirects it into Google Drive automatically.")
+        _step(
+            "7- Test it: open the game, create/modify a save, then check the Google Drive folder and confirm files are updating.")
+        _step(
+            "8- On another PC: install Google Drive for desktop, let it sync the same game folder, then set that PC's Save Game Folder and Google Drive Sync Folder the same way and press Sync.")
+
+        ttk.Label(
+            tips_body,
+            text="Tip: Always use a separate folder per game inside Google Drive. Do not pick the root 'Google Drive' folder.",
+            wraplength=760,
+            justify="left"
+        ).pack(anchor="w", fill="x", pady=(8, 0))
 
     # -----------------------------
     # GOOGLE CLOUD SYNC LOGIC
     # -----------------------------
+
     def sync_backup_to_cloud(self):
         save_path = self.google_save_path.get().strip()
         drive_path = self.google_drive_path.get().strip()
@@ -556,20 +788,20 @@ class App(tk.Tk):
             messagebox.showerror("Invalid Google Drive Path", "Please select a valid Google Drive sync directory.")
             return
 
-        try:
+        def work():
             backup_path = save_path + "_backup"
+
+            # rename original save folder (once)
             if not os.path.exists(backup_path):
                 os.rename(save_path, backup_path)
 
+            # Create junction to Google Drive folder
             cmd = f'mklink /J "{save_path}" "{drive_path}"'
             result = os.system(cmd)
             if result != 0:
-                messagebox.showerror(
-                    "Junction Failed",
-                    "Failed to create junction. Run the app as Administrator."
-                )
-                return
+                raise RuntimeError("Failed to create junction. Run the app as Administrator.")
 
+            # Copy existing save data into Drive folder
             for item in os.listdir(backup_path):
                 src = os.path.join(backup_path, item)
                 dst = os.path.join(drive_path, item)
@@ -578,11 +810,15 @@ class App(tk.Tk):
                 else:
                     shutil.copy2(src, dst)
 
+            return True
+
+        def ok(_):
             messagebox.showinfo("Success", "Cloud sync link created successfully!")
 
-        except Exception as e:
+        def err(e, tb):
             messagebox.showerror("Error", f"Failed to sync:\n{e}")
 
+        self.run_async("Linking + syncing to cloud…", work, on_success=ok, on_error=err, show_loading=True)
 
     # -----------------------------
     # ABOUT TAB
@@ -677,6 +913,7 @@ class App(tk.Tk):
             cache["last_backup_dir"] = d
             save_cache(cache)
 
+
     def on_find_paths(self):
         game = self.game_entry.get().strip()
         if not game:
@@ -687,31 +924,32 @@ class App(tk.Tk):
         self.backup_btn.config(state="disabled")
         log_append(self.log, f"Finding save paths for: {game}")
 
-        def worker():
-            try:
-                found, hints = find_save_paths(game, self.log)
-                self.found_paths = found
+        def work():
+            found, hints = find_save_paths(game, self.log)
+            return (found, hints)
 
-                if not found:
-                    self.after(0, lambda: messagebox.showwarning(
-                        "No Save Files Found",
-                        "No save files were found for this game.\n"
-                        "Make sure the game is installed & has been run at least once."
-                    ))
-                    return
+        def ok(res):
+            found, hints = res
+            self.found_paths = found
 
-                def after_ui():
-                    self.paths_list.delete(0, "end")
-                    for p in found:
-                        self.paths_list.insert("end", p)
-                    self.backup_btn.config(state="normal")
+            if not found:
+                messagebox.showwarning(
+                    "No Save Files Found",
+                    "No save files were found for this game.\n"
+                    "Make sure the game is installed & has been run at least once."
+                )
+                return
 
-                self.after(0, after_ui)
+            self.paths_list.delete(0, "end")
+            for p in found:
+                self.paths_list.insert("end", p)
+            self.backup_btn.config(state="normal")
 
-            except Exception as e:
-                self.after(0, lambda: log_append(self.log, f"Error: {e}"))
+        def err(e, tb):
+            log_append(self.log, f"Error: {e}")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self.run_async("Finding save paths…", work, on_success=ok, on_error=err, show_loading=True)
+
 
     def on_backup(self):
         if not self.found_paths:
@@ -726,8 +964,16 @@ class App(tk.Tk):
         cache["last_backup_dir"] = backup_root
         save_cache(cache)
 
-        zip_path = make_backup(game, self.found_paths, backup_root, self.log)
-        messagebox.showinfo("Backup Complete", f"Backup created:\n{zip_path}")
+        def work():
+            return make_backup(game, self.found_paths, backup_root, self.log)
+
+        def ok(zip_path):
+            messagebox.showinfo("Backup Complete", f"Backup created:\n{zip_path}")
+
+        def err(e, tb):
+            messagebox.showerror("Backup Failed", f"{e}")
+
+        self.run_async("Creating backup…", work, on_success=ok, on_error=err, show_loading=True)
 
     def open_selected_path(self, event=None):
         sel = self.paths_list.curselection()
@@ -759,29 +1005,30 @@ class App(tk.Tk):
         if f:
             self.restore_zip.set(f)
 
+
     def restore_backup(self):
         zipf = self.restore_zip.get().strip()
         if not zipf or not os.path.isfile(zipf):
             messagebox.showerror("Error", "Please select a valid backup ZIP.")
             return
 
-        try:
+        # Phase 1: analyze metadata + conflicts in background
+        def analyze():
             with zipfile.ZipFile(zipf, "r") as z:
                 try:
                     meta = json.loads(z.read("__pcsm_paths.json").decode("utf-8"))
-                except:
-                    messagebox.showerror("Error", "Backup missing metadata.")
-                    return
+                except Exception:
+                    raise RuntimeError("Backup missing metadata.")
 
                 paths_meta = meta.get("paths", [])
                 if not paths_meta:
-                    messagebox.showerror("Error", "Metadata contains no save paths.")
-                    return
+                    raise RuntimeError("Metadata contains no save paths.")
 
                 index_map = {p["index"]: p for p in paths_meta}
 
-                # Check conflicts
                 conflict = False
+                file_count = 0
+
                 for zinfo in z.infolist():
                     if zinfo.filename == "__pcsm_paths.json" or zinfo.filename.endswith("/"):
                         continue
@@ -791,7 +1038,7 @@ class App(tk.Tk):
                     idx_s, rel = parts
                     try:
                         idx = int(idx_s)
-                    except:
+                    except Exception:
                         continue
                     rec = index_map.get(idx)
                     if not rec:
@@ -799,71 +1046,104 @@ class App(tk.Tk):
                     base = rec["base"]
                     typ = rec["type"]
                     dest = os.path.join(base, rel) if typ == "dir" else base
+                    file_count += 1
                     if os.path.exists(dest):
                         conflict = True
-                        break
+                return {"conflict": conflict, "file_count": file_count}
 
-                if conflict:
-                    ok = messagebox.askokcancel(
-                        "Overwrite files?",
-                        "Some destination files already exist.\n\n"
-                        "Press Overwrite to replace ALL existing files,\n"
-                        "or Cancel to abort restore."
-                    )
-                    if not ok:
-                        return
+        def after_analyze(info):
+            conflict = info["conflict"]
 
-                # Perform restore (overwrite all)
-                count = 0
-                for zinfo in z.infolist():
-                    if zinfo.filename == "__pcsm_paths.json" or zinfo.filename.endswith("/"):
-                        continue
-                    parts = zinfo.filename.split("/", 1)
-                    if len(parts) != 2:
-                        continue
-                    idx_s, rel = parts
-                    try:
-                        idx = int(idx_s)
-                    except:
-                        continue
-                    rec = index_map.get(idx)
-                    if not rec:
-                        continue
-                    base = rec["base"]
-                    typ = rec["type"]
-                    dest = os.path.join(base, rel) if typ == "dir" else base
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    with z.open(zinfo) as src, open(dest, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                    count += 1
+            if conflict:
+                ok = messagebox.askokcancel(
+                    "Overwrite files?",
+                    "Some destination files already exist.\n\n"
+                    "Press Overwrite to replace ALL existing files,\n"
+                    "or Cancel to abort restore."
+                )
+                if not ok:
+                    return
 
+            # Phase 2: do actual restore in background
+            def do_restore():
+                with zipfile.ZipFile(zipf, "r") as z:
+                    meta = json.loads(z.read("__pcsm_paths.json").decode("utf-8"))
+                    paths_meta = meta.get("paths", [])
+                    index_map = {p["index"]: p for p in paths_meta}
+
+                    count = 0
+                    for zinfo in z.infolist():
+                        if zinfo.filename == "__pcsm_paths.json" or zinfo.filename.endswith("/"):
+                            continue
+                        parts = zinfo.filename.split("/", 1)
+                        if len(parts) != 2:
+                            continue
+                        idx_s, rel = parts
+                        try:
+                            idx = int(idx_s)
+                        except Exception:
+                            continue
+                        rec = index_map.get(idx)
+                        if not rec:
+                            continue
+                        base = rec["base"]
+                        typ = rec["type"]
+                        dest = os.path.join(base, rel) if typ == "dir" else base
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with z.open(zinfo) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        count += 1
+                    return count
+
+            def after_restore(count):
                 messagebox.showinfo("Restore Complete", f"Files restored: {count}")
 
-        except Exception as e:
+            def err_restore(e, tb):
+                messagebox.showerror("Error", f"Restore failed:\n{e}")
+
+            self.run_async("Restoring files…", do_restore, on_success=after_restore, on_error=err_restore, show_loading=True)
+
+        def err_analyze(e, tb):
             messagebox.showerror("Error", f"Restore failed:\n{e}")
+
+        self.run_async("Preparing restore…", analyze, on_success=after_analyze, on_error=err_analyze, show_loading=True)
 
     # -----------------------------
     # Autocomplete
     # -----------------------------
+
     def on_game_typed(self, event):
         if event.keysym in ("Up", "Down", "Return", "Escape"):
             return
 
-        text = self.game_entry.get().strip()
-
-        if self.suggest_after_id:
-            self.after_cancel(self.suggest_after_id)
-
-        if len(text) < 2:
-            if self.suggestion_box:
-                self.suggestion_box.destroy()
-                self.suggestion_box = None
+        # Only suggest on Backup tab
+        try:
+            if self.notebook.index("current") != 0:
+                return
+        except Exception:
             return
 
-        self.suggest_after_id = self.after(300, lambda: self.run_suggestion_search(text))
+        text_in = self.game_entry.get().strip()
 
-    def run_suggestion_search(self, text):
-        def worker(q):
+        if self.suggest_after_id:
+            try:
+                self.after_cancel(self.suggest_after_id)
+            except Exception:
+                pass
+            self.suggest_after_id = None
+
+        if len(text_in) < 2:
+            self.destroy_suggestion_box()
+            return
+
+        self.suggest_seq += 1
+        seq = self.suggest_seq
+        self.last_suggest_query = text_in
+
+        self.suggest_after_id = self.after(300, lambda: self.run_suggestion_search(text_in, seq))
+
+    def run_suggestion_search(self, text, seq):
+        def worker(q, seq):
             results = []
             try:
                 params = {
@@ -879,11 +1159,25 @@ class App(tk.Tk):
                 results = [i["title"] for i in data.get("query", {}).get("search", [])]
             except:
                 pass
-            self.after(0, lambda: self.show_suggestions(results))
+            self.after(0, lambda: self.show_suggestions(results, q, seq))
 
-        threading.Thread(target=worker, args=(text,), daemon=True).start()
+        threading.Thread(target=worker, args=(text, seq,), daemon=True).start()
 
-    def show_suggestions(self, results):
+    def show_suggestions(self, results, query, seq):
+        # Ignore stale results or when user left the Backup tab
+        try:
+            if seq != self.suggest_seq:
+                return
+            if self.notebook.index("current") != 0:
+                return
+        except Exception:
+            return
+
+        # If the user already typed something different, ignore
+        current = self.game_entry.get().strip()
+        if not current or not current.lower().startswith(query.lower()):
+            return
+
         if self.suggestion_box:
             self.suggestion_box.destroy()
 
@@ -970,6 +1264,20 @@ class App(tk.Tk):
         self.destroy_suggestion_box()
         self.game_entry.focus_set()
 
+
+    def on_game_entry_focus_out(self, event=None):
+        # Clicking the suggestion list temporarily moves focus away; delay then decide
+        def _maybe_close():
+            try:
+                f = self.focus_get()
+                if self.suggestion_box and f is self.suggestion_box:
+                    return
+            except Exception:
+                pass
+            self.destroy_suggestion_box()
+
+        self.after(150, _maybe_close)
+
     # -----------------------------
     # Update check helpers
     # -----------------------------
@@ -977,36 +1285,37 @@ class App(tk.Tk):
         nums = re.findall(r"\d+", v)
         return tuple(int(n) for n in nums[:4]) or (0,)
 
+
     def manual_check_for_update(self):
         """Manual check from About tab."""
-        def worker():
-            try:
-                req = urllib.request.Request(
-                    GITHUB_API_LATEST,
-                    headers={"User-Agent": "PC-Savegame-Manager"}
-                )
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    data = json.loads(r.read().decode("utf-8", "replace"))
-                tag = str(data.get("tag_name") or data.get("name") or "").strip()
-                cur = APP_VERSION
-                newer = bool(tag and self._parse_ver_tuple(tag) > self._parse_ver_tuple(cur))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Update check failed", str(e)))
-                return
 
-            def after():
-                if newer:
-                    if messagebox.askyesno(
-                        "New Version Available",
-                        f"A newer version {tag} is available.\n\nOpen the releases page now?"
-                    ):
-                        webbrowser.open(GITHUB_RELEASES_PAGE)
-                else:
-                    messagebox.showinfo("You're up to date", f"Current version {cur} is the latest.")
+        def work():
+            req = urllib.request.Request(
+                GITHUB_API_LATEST,
+                headers={"User-Agent": "PC-Savegame-Manager"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            tag = str(data.get("tag_name") or data.get("name") or "").strip()
+            cur = APP_VERSION
+            newer = bool(tag and self._parse_ver_tuple(tag) > self._parse_ver_tuple(cur))
+            return (tag, cur, newer)
 
-            self.after(0, after)
+        def ok(res):
+            tag, cur, newer = res
+            if newer:
+                if messagebox.askyesno(
+                    "New Version Available",
+                    f"A newer version {tag} is available.\n\nOpen the releases page now?"
+                ):
+                    webbrowser.open(GITHUB_RELEASES_PAGE)
+            else:
+                messagebox.showinfo("You're up to date", f"Current version {cur} is the latest.")
 
-        threading.Thread(target=worker, daemon=True).start()
+        def err(e, tb):
+            messagebox.showerror("Update check failed", str(e))
+
+        self.run_async("Checking for updates…", work, on_success=ok, on_error=err, show_loading=True)
 
     def check_latest_app_version_async(self):
         """Automatic check on startup; silent on errors."""
