@@ -418,27 +418,11 @@ class App(tk.Tk):
         # =============================
         style = ttk.Style(self)
 
-        # Bigger notebook tabs
-        style.configure(
-            "TNotebook.Tab",
-            padding=(20, 12),
-            font=("Segoe UI", 12, "bold")
-        )
-
-        # Bigger text for labels
+        style.configure("TNotebook.Tab", padding=(20, 12), font=("Segoe UI", 12, "bold"))
         style.configure("TLabel", font=("Segoe UI", 12))
-
-        # Bigger text entry
         style.configure("TEntry", font=("Segoe UI", 12))
+        style.configure("Big.TButton", padding=(14, 10), font=("Segoe UI", 12, "bold"))
 
-        # Bigger buttons
-        style.configure(
-            "Big.TButton",
-            padding=(14, 10),
-            font=("Segoe UI", 12, "bold")
-        )
-
-        # Bigger combobox font
         self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 12))
         self.option_add("*Font", ("Segoe UI", 12))
 
@@ -451,14 +435,12 @@ class App(tk.Tk):
 
         self.suggestion_box = None
         self.suggest_after_id = None
-        self.found_paths = []  # last found save paths
-
-        # Loading window (reused by workers)
+        self.found_paths = []
         self.loading = LoadingWindow(self)
 
-        # Suggestion request sequencing (prevents stale results)
         self.suggest_seq = 0
         self.last_suggest_query = ""
+        self.suppress_suggestions = False
 
         # Header
         self.build_header()
@@ -472,21 +454,86 @@ class App(tk.Tk):
 
         self.notebook.add(self.tab_backup, text="Backup")
         self.notebook.add(self.tab_restore, text="Restore")
-        self.notebook.add(self.tab_google, text="Sync with Google Drive") 
+        self.notebook.add(self.tab_google, text="Sync with Google Drive")
         self.notebook.add(self.tab_about, text="About")
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
-        # Build tabs
+        # Hide suggestions when clicking anywhere else (forces focus out)
+        self.bind_all("<Button-1>", self._any_click_force_focus_out, add="+")
+
+        # Build tabs (game_entry is created in build_backup_tab)
         self.build_backup_tab()
         self.build_restore_tab()
         self.build_google_tab()
         self.build_about_tab()
 
+        # NOW bind the entry focus/click to refresh suggestions again
+        if hasattr(self, "game_entry") and self.game_entry is not None:
+            self.game_entry.bind("<FocusIn>", self._entry_refocus_check_suggestions, add="+")
+            self.game_entry.bind("<Button-1>", self._entry_refocus_check_suggestions, add="+")
+
         # Center + auto-check for updates
         self.after(100, self.center)
         self.after(1200, self.check_latest_app_version_async)
+
+
+    def _any_click_force_focus_out(self, event):
+        # If game_entry not created yet, do nothing
+        if not hasattr(self, "game_entry") or self.game_entry is None:
+            return
+
+        clicked = None
+        try:
+            clicked = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            pass
+
+        # If click is on entry or on suggestion box, keep it
+        if clicked is self.game_entry or clicked is self.suggestion_box:
+            return
+
+        # Force focus away from entry
+        try:
+            if clicked is not None:
+                clicked.focus_set()
+            else:
+                self.focus_set()
+        except Exception:
+            self.focus_set()
+
+        # Hide suggestions immediately
+        self.destroy_suggestion_box()
+
+
+    def _entry_refocus_check_suggestions(self, event=None):
+        # Delay so focus is applied first
+        self.after(1, self._entry_refocus_check_suggestions_now)
+
+
+    def _entry_refocus_check_suggestions_now(self):
+        # Only show on Backup tab (index 0)
+        try:
+            if self.notebook.index("current") != 0:
+                return
+        except Exception:
+            return
+
+        txt = self.game_entry.get().strip()
+
+        # Always hide first
+        self.destroy_suggestion_box()
+
+        # Re-check name again (fresh)
+        if len(txt) < 2:
+            return
+
+        class _E:
+            keysym = ""
+
+        self.on_game_typed(_E())
+
 
     # -------------------------
     # Header with logo + title
@@ -1113,6 +1160,8 @@ class App(tk.Tk):
     # -----------------------------
 
     def on_game_typed(self, event):
+        if self.suppress_suggestions:
+            return
         if event.keysym in ("Up", "Down", "Return", "Escape"):
             return
 
@@ -1259,10 +1308,17 @@ class App(tk.Tk):
         if not sel:
             return
         val = self.suggestion_box.get(sel[0])
-        self.game_entry.delete(0, "end")
-        self.game_entry.insert("end", val)
-        self.destroy_suggestion_box()
-        self.game_entry.focus_set()
+        # ✅ stop dropdown from reopening when we set text programmatically
+        self.suppress_suggestions = True
+        try:
+            self.game_entry.delete(0, "end")
+            self.game_entry.insert("end", val)
+            self.destroy_suggestion_box()
+            self.game_entry.focus_set()
+        finally:
+            # re-enable after the click event finishes
+            self.after(50, lambda: setattr(self, "suppress_suggestions", False))
+
 
 
     def on_game_entry_focus_out(self, event=None):
